@@ -3,32 +3,33 @@ import wave
 import numpy as np
 import cv2
 import threading
-import pygetwindow as gw
 import pyautogui
 import sounddevice as sd
 import time
 import os
+import sys
 
 # 录制屏幕
-def screen_record(filename):
-    screen = pyautogui.screenshot(region=(100, 100, 1920, 1080))  # 设置录制区域
+def screen_record(filename, stop_event):
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     out = cv2.VideoWriter(filename, fourcc, 30.0, (1920, 1080))
-
-    while True:
+    
+    while not stop_event.is_set():
+        screen = pyautogui.screenshot(region=(0, 0, 1920, 1080))  # 设置录制区域
         frame = np.array(screen)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         out.write(frame)
-        screen = pyautogui.screenshot(region=(100, 100, 1920, 1080))
         time.sleep(0.03)  # 保持30帧每秒
 
+    out.release()
+
 # 录制麦克风音频
-def record_microphone(filename):
+def record_microphone(filename, stop_event):
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
     
     frames = []
-    while True:
+    while not stop_event.is_set():
         data = stream.read(1024)
         frames.append(data)
     
@@ -40,14 +41,13 @@ def record_microphone(filename):
     wf.close()
 
 # 录制系统音频
-def record_system_audio(filename):
-    # 使用sounddevice库来捕获系统音频
+def record_system_audio(filename, stop_event):
     fs = 44100  # 采样率
     duration = 10  # 录制时长（秒）
-    
-    # 你需要手动配置系统音频设备索引
+
+    # 获取所有可用的音频设备
     device_info = sd.query_devices()
-    print(device_info)  # 查看所有设备
+    print("可用设备：", device_info)
     device_index = 1  # 假设系统音频设备的索引是1，视实际设备而定
 
     # 开始录音
@@ -69,15 +69,39 @@ def merge_audio_video(audio_file, video_file, output_file):
     command = f'ffmpeg -i {video_file} -i {audio_file} -c:v copy -c:a aac -strict experimental {output_file}'
     os.system(command)
 
+# 停止录制功能
+def stop_recording(screen_thread, mic_thread, system_thread, stop_event):
+    stop_event.set()
+    screen_thread.join()
+    mic_thread.join()
+    system_thread.join()
+    print("录制已停止。")
+
 if __name__ == '__main__':
+    stop_event = threading.Event()
+
     # 启动线程来录制屏幕
-    screen_thread = threading.Thread(target=screen_record, args=("output_video.avi",))
+    screen_thread = threading.Thread(target=screen_record, args=("output_video.avi", stop_event))
     screen_thread.start()
 
     # 启动线程来录制麦克风
-    mic_thread = threading.Thread(target=record_microphone, args=("microphone_audio.wav",))
+    mic_thread = threading.Thread(target=record_microphone, args=("microphone_audio.wav", stop_event))
     mic_thread.start()
 
     # 启动线程来录制系统音频
-    system_thread = threading.Thread(target=record_system_audio, args=("system_audio.wav",))
+    system_thread = threading.Thread(target=record_system_audio, args=("system_audio.wav", stop_event))
     system_thread.start()
+
+    print("录制已开始，按 'q' 停止录制...")
+
+    # 等待用户输入停止命令
+    while True:
+        user_input = input("请输入 'q' 停止录制: ")
+        if user_input.lower() == 'q':
+            stop_recording(screen_thread, mic_thread, system_thread, stop_event)
+            break
+
+    # 合成音频与视频
+    print("正在合成音频与视频...")
+    merge_audio_video("system_audio.wav", "output_video.avi", "final_output.mp4")
+    print("合成完成，文件为 final_output.mp4")
