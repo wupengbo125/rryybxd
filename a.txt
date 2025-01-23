@@ -1,135 +1,136 @@
-import pyaudio
-import wave
-import sounddevice as sd
+import cv2
 import numpy as np
-import subprocess
+import pyautogui
+import sounddevice as sd
+import pyaudio
 import threading
 import time
-import pyautogui
-import cv2
+from moviepy.editor import concatenate_videoclips, AudioFileClip, VideoFileClip
+import os
+from datetime import datetime
 
-# 自动选择音频设备
-def get_device_index(preferred_devices):
-    devices = sd.query_devices()
-    for i, device in enumerate(devices):
-        for preferred_device in preferred_devices:
-            if preferred_device.lower() in device['name'].lower():
-                print(f"选择设备: {device['name']}")
-                return i
+# 配置文件夹和文件名
+desktop_path = os.path.expanduser("~/Desktop")
+video_file = os.path.join(desktop_path, "video_temp.mp4")
+audio_file_mic = os.path.join(desktop_path, "audio_mic.wav")
+audio_file_sys = os.path.join(desktop_path, "audio_sys.wav")
+
+# 屏幕录制设置
+frame_rate = 30
+screen_size = pyautogui.size()
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+video_writer = cv2.VideoWriter(video_file, fourcc, frame_rate, screen_size)
+
+# 设置音频设备
+mic_device_1 = "麦克风一"
+mic_device_2 = "麦克风二"
+sys_device_1 = "系统声音1"
+sys_device_2 = "系统声音2"
+
+# 音频录制参数
+sample_rate = 44100
+channels = 2
+duration = 10  # 初步设置时长，后续可以修改
+
+# 存储音频
+mic_audio = []
+sys_audio = []
+
+def get_audio_device_id(name):
+    p = pyaudio.PyAudio()
+    for i in range(p.get_device_count()):
+        device_info = p.get_device_info_by_index(i)
+        if name in device_info["name"]:
+            return i
     return None
 
-# 录制系统音频
-def record_audio(filename, fs=44100, preferred_devices=None, stop_event=None):
-    if preferred_devices is None:
-        preferred_devices = ['system audio 1', 'system audio 2']
-
-    device_index = get_device_index(preferred_devices)
-
-    if device_index is None:
-        print("没有找到首选设备，使用默认设备。")
-        device_index = 0  # 默认设备
-
-    print(f"开始录制，使用设备 {device_index}...")
-
-    audio_data = []
-    while not stop_event.is_set():
-        data = sd.rec(int(1024), samplerate=fs, channels=2, dtype='int16', device=device_index)
-        sd.wait()
-        audio_data.append(data)
-
-    audio_data = np.concatenate(audio_data, axis=0)  # 将所有音频片段连接
-    write_wav_file(filename, audio_data, fs)
-    print(f"录制完成，保存为 {filename}")
-
-# 保存音频文件
-def write_wav_file(filename, audio_data, fs):
-    with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)  # 每个样本占2字节
-        wf.setframerate(fs)
-        wf.writeframes(audio_data.tobytes())
-
-# 合成音频与视频
-def merge_audio_video(audio_file1, audio_file2, video_file, output_file):
-    command = f'ffmpeg -i {video_file} -i {audio_file1} -i {audio_file2} -c:v copy -c:a aac -strict experimental {output_file}'
-    subprocess.run(command, shell=True)
-    print(f"音频与视频合成完成，输出文件: {output_file}")
-
-# 屏幕录制
-def screen_record(filename, stop_event):
-    screen = pyautogui.screenshot(region=(0, 0, 1920, 1080))  # 设置录制区域
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(filename, fourcc, 30.0, (1920, 1080))
-
-    while not stop_event.is_set():
-        frame = np.array(screen)
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        out.write(frame)
-        screen = pyautogui.screenshot(region=(0, 0, 1920, 1080))
-        time.sleep(0.03)  # 保持30帧每秒
-
-    out.release()
-
-# 录制麦克风
-def record_microphone(filename, stop_event, fs=44100):
-    preferred_devices = ['mic 1', 'mic 2']
-    device_index = get_device_index(preferred_devices)
-
-    if device_index is None:
-        print("没有找到首选麦克风设备，使用默认设备。")
-        device_index = 0  # 默认设备
-
-    print(f"开始录制麦克风，使用设备 {device_index}...")
-
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=fs, input=True, frames_per_buffer=1024, input_device_index=device_index)
-    
-    frames = []
-    
-    while not stop_event.is_set():
-        data = stream.read(1024)
-        frames.append(data)
-    
-    wf = wave.open(filename, 'wb')
-    wf.setnchannels(1)
-    wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-    wf.setframerate(fs)
-    wf.writeframes(b''.join(frames))
-    wf.close()
-
-# 停止录制功能
-def stop_recording(screen_thread, mic_thread, system_thread, stop_event):
-    stop_event.set()
-    screen_thread.join()
-    mic_thread.join()
-    system_thread.join()
-    print("录制已停止。")
-
-if __name__ == '__main__':
-    stop_event = threading.Event()
-
-    # 启动线程来录制屏幕
-    screen_thread = threading.Thread(target=screen_record, args=("output_video.avi", stop_event))
-    screen_thread.start()
-
-    # 启动线程来录制麦克风
-    mic_thread = threading.Thread(target=record_microphone, args=("microphone_audio.wav", stop_event))
-    mic_thread.start()
-
-    # 启动线程来录制系统音频
-    system_thread = threading.Thread(target=record_audio, args=("system_audio.wav", stop_event))
-    system_thread.start()
-
-    print("录制已开始，按 'q' 停止录制...")
-
-    # 等待用户输入停止命令
+def record_screen():
     while True:
-        user_input = input("请输入 'q' 停止录制: ")
+        # 获取屏幕图像
+        screen_image = pyautogui.screenshot()
+        frame = np.array(screen_image)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        video_writer.write(frame)
+        time.sleep(1 / frame_rate)
+
+def record_microphone():
+    mic_device_id = get_audio_device_id(mic_device_1)
+    if mic_device_id is None:
+        mic_device_id = get_audio_device_id(mic_device_2)
+    if mic_device_id is not None:
+        def callback(indata, frames, time, status):
+            if status:
+                print(status)
+            mic_audio.append(indata)
+        with sd.InputStream(device=mic_device_id, channels=channels, samplerate=sample_rate, callback=callback):
+            while True:
+                time.sleep(1)
+    else:
+        print("麦克风设备不可用")
+
+def record_system_audio():
+    sys_device_id = get_audio_device_id(sys_device_1)
+    if sys_device_id is None:
+        sys_device_id = get_audio_device_id(sys_device_2)
+    if sys_device_id is not None:
+        def callback(indata, frames, time, status):
+            if status:
+                print(status)
+            sys_audio.append(indata)
+        with sd.InputStream(device=sys_device_id, channels=channels, samplerate=sample_rate, callback=callback):
+            while True:
+                time.sleep(1)
+    else:
+        print("系统音频设备不可用")
+
+def save_audio():
+    # 保存音频
+    mic_audio_np = np.concatenate(mic_audio, axis=0)
+    sys_audio_np = np.concatenate(sys_audio, axis=0)
+    # 可以使用wave文件格式保存
+    sd.write(audio_file_mic, mic_audio_np, sample_rate)
+    sd.write(audio_file_sys, sys_audio_np, sample_rate)
+
+def merge_video_audio():
+    # 合并视频和音频
+    video_clip = VideoFileClip(video_file)
+    audio_mic_clip = AudioFileClip(audio_file_mic)
+    audio_sys_clip = AudioFileClip(audio_file_sys)
+
+    final_audio = audio_mic_clip.overlay(audio_sys_clip)
+    final_video = video_clip.set_audio(final_audio)
+    
+    # 最终文件名
+    final_filename = f"abv_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.mp4"
+    final_file_path = os.path.join(desktop_path, final_filename)
+    final_video.write_videofile(final_file_path, codec="libx264")
+
+    # 删除临时文件
+    os.remove(video_file)
+    os.remove(audio_file_mic)
+    os.remove(audio_file_sys)
+
+def stop_recording():
+    while True:
+        user_input = input("输入 'q' 停止录制: ")
         if user_input.lower() == 'q':
-            stop_recording(screen_thread, mic_thread, system_thread, stop_event)
             break
 
-    # 合成音频与视频
-    print("正在合成音频与视频...")
-    merge_audio_video("system_audio.wav", "microphone_audio.wav", "output_video.avi", "final_output.mp4")
-    print("合成完成，文件为 final_output.mp4")
+def main():
+    # 启动线程
+    screen_thread = threading.Thread(target=record_screen)
+    mic_thread = threading.Thread(target=record_microphone)
+    sys_thread = threading.Thread(target=record_system_audio)
+    stop_thread = threading.Thread(target=stop_recording)
+
+    screen_thread.start()
+    mic_thread.start()
+    sys_thread.start()
+    stop_thread.start()
+
+    stop_thread.join()
+    save_audio()
+    merge_video_audio()
+
+if __name__ == "__main__":
+    main()
