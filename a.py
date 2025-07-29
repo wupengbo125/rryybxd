@@ -1,86 +1,81 @@
-pip install pyaudio pyautogui pygetwindow opencv-python sounddevice numpy ffmpeg
+'''
+筛选出市值介于20-30亿的股票，选取其中市值最小的三只股票，
+每天开盘买入，持有五个交易日，然后调仓。
+'''
 
+## 初始化函数，设定要操作的股票、基准等等
+def initialize(context):
+    # 设定沪深300作为基准
+    set_benchmark('000300.XSHG')
+    # True为开启动态复权模式，使用真实价格交易
+    set_option('use_real_price', True)
+    # 设定成交量比例
+    set_option('order_volume_ratio', 1)
+    # 股票类交易手续费是：买入时佣金万分之三，卖出时佣金万分之三加千分之一印花税, 每笔交易佣金最低扣5块钱
+    set_order_cost(OrderCost(open_tax=0, close_tax=0.001, \
+                             open_commission=0.0003, close_commission=0.0003,\
+                             close_today_commission=0, min_commission=5), type='stock')
+    # 持仓数量
+    g.stocknum = 3 
+    # 交易日计时器
+    g.days = 0 
+    # 调仓频率
+    g.refresh_rate = 5
+    # 运行函数
+    run_daily(trade, 'every_bar')
 
-import pyaudio
-import wave
-import numpy as np
-import cv2
-import threading
-import pygetwindow as gw
-import pyautogui
-import sounddevice as sd
-import time
-import os
+## 选出小市值股票
+def check_stocks(context):
+    # 设定查询条件
+    q = query(
+            valuation.code,
+            valuation.market_cap
+        ).filter(
+            valuation.market_cap.between(20,30)
+        ).order_by(
+            valuation.market_cap.asc()
+        )
 
-# 录制屏幕
-def screen_record(filename):
-    screen = pyautogui.screenshot(region=(100, 100, 1920, 1080))  # 设置录制区域
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(filename, fourcc, 30.0, (1920, 1080))
+    # 选出低市值的股票，构成buylist
+    df = get_fundamentals(q)
+    buylist =list(df['code'])
 
-    while True:
-        frame = np.array(screen)
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        out.write(frame)
-        screen = pyautogui.screenshot(region=(100, 100, 1920, 1080))
-        time.sleep(0.03)  # 保持30帧每秒
+    # 过滤停牌股票
+    buylist = filter_paused_stock(buylist)
 
-# 录制麦克风音频
-def record_microphone(filename):
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, frames_per_buffer=1024)
-    
-    frames = []
-    while True:
-        data = stream.read(1024)
-        frames.append(data)
-    
-    wf = wave.open(filename, 'wb')
-    wf.setnchannels(1)
-    wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-    wf.setframerate(44100)
-    wf.writeframes(b''.join(frames))
-    wf.close()
+    return buylist[:g.stocknum]
+## 交易函数
+def trade(context):
+    if g.days%g.refresh_rate == 0:
 
-# 录制系统音频
-def record_system_audio(filename):
-    # 使用sounddevice库来捕获系统音频
-    fs = 44100  # 采样率
-    duration = 10  # 录制时长（秒）
-    
-    # 你需要手动配置系统音频设备索引
-    device_info = sd.query_devices()
-    print(device_info)  # 查看所有设备
-    device_index = 1  # 假设系统音频设备的索引是1，视实际设备而定
+        ## 获取持仓列表
+        sell_list = list(context.portfolio.positions.keys())
+        # 如果有持仓，则卖出
+        if len(sell_list) > 0 :
+            for stock in sell_list:
+                order_target_value(stock, 0)
 
-    # 开始录音
-    audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=2, dtype='int16', device=device_index)
-    sd.wait()
+        ## 分配资金
+        if len(context.portfolio.positions) < g.stocknum :
+            Num = g.stocknum - len(context.portfolio.positions)
+            Cash = context.portfolio.cash/Num
+        else: 
+            Cash = 0
 
-    # 保存音频到文件
-    write_wav_file(filename, audio_data, fs)
+        ## 选股
+        stock_list = check_stocks(context)
 
-def write_wav_file(filename, audio_data, fs):
-    with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)  # 每个样本占2字节
-        wf.setframerate(fs)
-        wf.writeframes(audio_data.tobytes())
+        ## 买入股票
+        for stock in stock_list:
+            if len(context.portfolio.positions.keys()) < g.stocknum:
+                order_value(stock, Cash)
 
-# 合成音频与视频
-def merge_audio_video(audio_file, video_file, output_file):
-    command = f'ffmpeg -i {video_file} -i {audio_file} -c:v copy -c:a aac -strict experimental {output_file}'
-    os.system(command)
+        # 天计数加一
+        g.days = 1
+    else:
+        g.days += 1
 
-if __name__ == '__main__':
-    # 启动线程来录制屏幕
-    screen_thread = threading.Thread(target=screen_record, args=("output_video.avi",))
-    screen_thread.start()
-
-    # 启动线程来录制麦克风
-    mic_thread = threading.Thread(target=record_microphone, args=("microphone_audio.wav",))
-    mic_thread.start()
-
-    # 启动线程来录制系统音频
-    system_thread = threading.Thread(target=record_system_audio, args=("system_audio.wav",))
-    system_thread.start()
+# 过滤停牌股票
+def filter_paused_stock(stock_list):
+    current_data = get_current_data()
+    return [stock for stock in stock_list if not current_data[stock].paused]
